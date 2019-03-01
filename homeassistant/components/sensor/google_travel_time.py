@@ -67,7 +67,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
         }))
 })
 
-TRACKABLE_DOMAINS = ['device_tracker', 'sensor', 'zone']
+TRACKABLE_DOMAINS = ['device_tracker', 'sensor', 'zone', 'person']
 DATA_KEY = 'google_travel_time'
 
 
@@ -224,8 +224,8 @@ class GoogleTravelTimeSensor(Entity):
                 self._destination_entity_id
             )
 
-        self._destination = self._resolve_zone(self._destination)
-        self._origin = self._resolve_zone(self._origin)
+        _LOGGER.info('origin: %s, destination: %s' %
+                     (self._origin, self._destination))
 
         if self._destination is not None and self._origin is not None:
             self._matrix = self._client.distance_matrix(
@@ -234,6 +234,7 @@ class GoogleTravelTimeSensor(Entity):
     def _get_location_from_entity(self, entity_id):
         """Get the location from the entity state or attributes."""
         entity = self._hass.states.get(entity_id)
+        _LOGGER.info(entity)
 
         if entity is None:
             _LOGGER.error("Unable to find entity %s", entity_id)
@@ -253,6 +254,15 @@ class GoogleTravelTimeSensor(Entity):
             )
             return self._get_location_from_attributes(zone_entity)
 
+        # Check if device is a person
+        person_entity = self._hass.states.get("person.%s" % entity.state)
+        if location.has_location(person_entity):
+            _LOGGER.debug(
+                "%s is in %s, getting person location",
+                entity_id, person_entity.entity_id
+            )
+            return self._get_location_from_attributes(person_entity)
+
         # If zone was not found in state then use the state as the location
         if entity_id.startswith("sensor."):
             return entity.state
@@ -265,11 +275,3 @@ class GoogleTravelTimeSensor(Entity):
         """Get the lat/long string from an entities attributes."""
         attr = entity.attributes
         return "%s,%s" % (attr.get(ATTR_LATITUDE), attr.get(ATTR_LONGITUDE))
-
-    def _resolve_zone(self, friendly_name):
-        entities = self._hass.states.all()
-        for entity in entities:
-            if entity.domain == 'zone' and entity.name == friendly_name:
-                return self._get_location_from_attributes(entity)
-
-        return friendly_name
