@@ -67,7 +67,9 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
         }))
 })
 
+TRACKABLE_DOMAINS = ['device_tracker', 'sensor', 'zone']
 DATA_KEY = 'google_travel_time'
+
 
 def convert_time_to_utc(timestr):
     """Take a string like 08:00:00 and convert it to a unix timestamp."""
@@ -122,7 +124,6 @@ def setup_platform(hass, config, add_entities_callback, discovery_info=None):
 
 class GoogleTravelTimeSensor(Entity):
     """Representation of a Google travel time sensor."""
-    import googlemaps
 
     def __init__(self, hass, name, api_key, origin, destination, options):
         """Initialize the sensor."""
@@ -133,12 +134,19 @@ class GoogleTravelTimeSensor(Entity):
         self._matrix = None
         self.valid_api_connection = True
 
-        self._origin = origin
-        self._destination = destination
+        # Check if location is a trackable entity
+        if origin.split('.', 1)[0] in TRACKABLE_DOMAINS:
+            self._origin_entity_id = origin
+        else:
+            self._origin = origin
+
+        if destination.split('.', 1)[0] in TRACKABLE_DOMAINS:
+            self._destination_entity_id = destination
+        else:
+            self._destination = destination
 
         import googlemaps
         self._client = googlemaps.Client(api_key, timeout=10)
-
         try:
             self.update()
         except googlemaps.exceptions.ApiError as exp:
@@ -205,23 +213,32 @@ class GoogleTravelTimeSensor(Entity):
         elif atime is not None:
             options_copy['arrival_time'] = atime
 
-        origin_entity = self._hass.states.get(self._origin)
-        if origin_entity is not None:
-            entity = self._get_location_from_entity(
-                origin_entity)
-            self._origin = self._resolve_zone(entity)
+        # Convert device_trackers to google friendly location
+        if hasattr(self, '_origin_entity_id'):
+            self._origin = self._get_location_from_entity(
+                self._origin_entity_id
+            )
 
-        destination_entity = self._hass.states.get(self._destination)
-        if destination_entity is not None:
-            entity = self._get_location_from_entity(
-                destination_entity)
-            self._destination = self._resolve_zone(entity)
+        if hasattr(self, '_destination_entity_id'):
+            self._destination = self._get_location_from_entity(
+                self._destination_entity_id
+            )
 
-        self._matrix = self._client.distance_matrix(
-            self._origin, self._destination, **options_copy)
+        self._destination = self._resolve_zone(self._destination)
+        self._origin = self._resolve_zone(self._origin)
 
-    def _get_location_from_entity(self, entity):
+        if self._destination is not None and self._origin is not None:
+            self._matrix = self._client.distance_matrix(
+                self._origin, self._destination, **options_copy)
+
+    def _get_location_from_entity(self, entity_id):
         """Get the location from the entity state or attributes."""
+        entity = self._hass.states.get(entity_id)
+
+        if entity is None:
+            _LOGGER.error("Unable to find entity %s", entity_id)
+            self.valid_api_connection = False
+            return None
 
         # Check if the entity has location attributes
         if location.has_location(entity):
@@ -230,13 +247,18 @@ class GoogleTravelTimeSensor(Entity):
         # Check if device is in a zone
         zone_entity = self._hass.states.get("zone.%s" % entity.state)
         if location.has_location(zone_entity):
-            _LOGGER.debug("getting zone location for %s",
-                          zone_entity.entity_id)
-
+            _LOGGER.debug(
+                "%s is in %s, getting zone location",
+                entity_id, zone_entity.entity_id
+            )
             return self._get_location_from_attributes(zone_entity)
 
         # If zone was not found in state then use the state as the location
-        return entity.state
+        if entity_id.startswith("sensor."):
+            return entity.state
+
+        # When everything fails just return nothing
+        return None
 
     @staticmethod
     def _get_location_from_attributes(entity):
